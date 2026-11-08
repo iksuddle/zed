@@ -25060,6 +25060,132 @@ async fn test_completion_reuse(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_completion_trigger_refresh_uses_latest_query(cx: &mut TestAppContext) {
+    init_test(cx, |settings| {
+        settings.defaults.completions = Some(CompletionSettingsContent {
+            words: Some(WordsCompletionMode::Disabled),
+            ..Default::default()
+        });
+    });
+
+    let mut cx = EditorLspTestContext::new(
+        Language::new(
+            LanguageConfig {
+                name: "Ruby".into(),
+                matcher: (LanguageMatcher {
+                    path_suffixes: vec!["rb".into()],
+                    ..Default::default()
+                })
+                .into(),
+                completion_query_characters: ['.'].into_iter().collect(),
+                ..Default::default()
+            },
+            None,
+        ),
+        lsp::ServerCapabilities {
+            completion_provider: Some(lsp::CompletionOptions {
+                trigger_characters: Some(vec![".".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+
+    let completion_requests = Arc::new(AtomicUsize::new(0));
+    let (response_sender, response_receiver) = oneshot::channel::<()>();
+    let response_receiver = response_receiver.shared();
+    let _requests = cx.set_request_handler::<lsp::request::Completion, _, _>({
+        let completion_requests = completion_requests.clone();
+        move |_, params, _| {
+            let request_index = completion_requests.fetch_add(1, atomic::Ordering::SeqCst);
+            if request_index == 1 {
+                assert_eq!(
+                    params.context,
+                    Some(lsp::CompletionContext {
+                        trigger_kind: lsp::CompletionTriggerKind::TRIGGER_CHARACTER,
+                        trigger_character: Some(".".into()),
+                    })
+                );
+            }
+            let response_receiver = response_receiver.clone();
+            async move {
+                let labels = if request_index == 0 {
+                    vec!["repos"]
+                } else {
+                    response_receiver.await?;
+                    vec!["repos.cafe_repo", "repos.user_repo"]
+                };
+                Ok(Some(lsp::CompletionResponse::List(lsp::CompletionList {
+                    is_incomplete: false,
+                    item_defaults: None,
+                    items: labels
+                        .into_iter()
+                        .map(|label| lsp::CompletionItem {
+                            label: label.into(),
+                            text_edit: Some(lsp::CompletionTextEdit::Edit(lsp::TextEdit {
+                                range: lsp::Range::new(
+                                    lsp::Position::new(0, 6),
+                                    params.text_document_position.position,
+                                ),
+                                new_text: label.into(),
+                            })),
+                            ..Default::default()
+                        })
+                        .collect(),
+                })))
+            }
+        }
+    });
+
+    cx.set_state(r#"Deps["reposˇ"]"#);
+    cx.update_editor(|editor, window, cx| {
+        editor.show_completions(&ShowCompletions, window, cx);
+    });
+    cx.run_until_parked();
+    check_displayed_completions(vec!["repos"], &mut cx);
+    assert_eq!(completion_requests.load(atomic::Ordering::SeqCst), 1);
+
+    cx.simulate_keystroke(".");
+    cx.run_until_parked();
+    assert_eq!(
+        completion_requests.load(atomic::Ordering::SeqCst),
+        2,
+        "a trigger character must refresh an already open, complete menu"
+    );
+
+    cx.simulate_keystroke("c");
+    cx.run_until_parked();
+    response_sender
+        .send(())
+        .expect("completion response should still be waiting");
+    cx.run_until_parked();
+    cx.assert_editor_state(r#"Deps["repos.cˇ"]"#);
+    check_displayed_completions(vec!["repos.cafe_repo"], &mut cx);
+
+    let requests_after_refresh = completion_requests.load(atomic::Ordering::SeqCst);
+    cx.simulate_keystroke("a");
+    cx.run_until_parked();
+    check_displayed_completions(vec!["repos.cafe_repo"], &mut cx);
+    assert_eq!(
+        completion_requests.load(atomic::Ordering::SeqCst),
+        requests_after_refresh,
+        "typing after a complete refresh should filter the existing menu"
+    );
+
+    let completion_task = cx
+        .update_editor(|editor, window, cx| {
+            editor.confirm_completion(&ConfirmCompletion::default(), window, cx)
+        })
+        .expect("the refreshed completion should be available to confirm");
+    completion_task
+        .await
+        .expect("confirming the completion should succeed");
+    cx.assert_editor_state(r#"Deps["repos.cafe_repoˇ"]"#);
+}
+
+#[gpui::test]
 async fn test_word_completion(cx: &mut TestAppContext) {
     let lsp_fetch_timeout_ms = 10;
     init_test(cx, |language_settings| {

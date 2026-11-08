@@ -451,6 +451,13 @@ impl Editor {
             }
             // When `is_incomplete` is false, no need to re-query completions when the current query
             // is a suffix of the initial query.
+            let is_trigger_character = trigger
+                .as_deref()
+                .is_some_and(|text| buffer.read(cx).completion_triggers().contains(text));
+            if is_trigger_character {
+                // Prevent subsequent input from reusing stale results while the refresh is pending.
+                menu.is_incomplete = true;
+            }
             let was_complete = !menu.is_incomplete;
             if was_complete && !was_snippets_only {
                 // If the new query is a suffix of the old query (typing more characters) and
