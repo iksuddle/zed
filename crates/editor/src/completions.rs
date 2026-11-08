@@ -438,6 +438,13 @@ impl Editor {
             Some(CompletionsMenuSource::SnippetsOnly)
         );
 
+        let trigger_character = trigger.as_ref().filter(|text| {
+            buffer
+                .read(cx)
+                .completion_triggers()
+                .contains(text.as_str())
+        });
+
         if let Some(CodeContextMenu::Completions(menu)) = self.context_menu.borrow_mut().as_mut() {
             if filter_completions {
                 menu.filter(
@@ -449,15 +456,12 @@ impl Editor {
                     cx,
                 );
             }
-            // When `is_incomplete` is false, no need to re-query completions when the current query
-            // is a suffix of the initial query.
-            let is_trigger_character = trigger
-                .as_deref()
-                .is_some_and(|text| buffer.read(cx).completion_triggers().contains(text));
-            if is_trigger_character {
+            if trigger_character.is_some() {
                 // Prevent subsequent input from reusing stale results while the refresh is pending.
                 menu.is_incomplete = true;
             }
+            // When `is_incomplete` is false, no need to re-query completions when the current query
+            // is a suffix of the initial query.
             let was_complete = !menu.is_incomplete;
             if was_complete && !was_snippets_only {
                 // If the new query is a suffix of the old query (typing more characters) and
@@ -536,21 +540,13 @@ impl Editor {
         let provider_responses = if let Some(provider) = &provider
             && load_provider_completions
         {
-            let trigger_character = trigger
-                .as_ref()
-                .filter(|trigger| {
-                    buffer
-                        .read(cx)
-                        .completion_triggers()
-                        .contains(trigger.as_str())
-                })
-                .cloned();
             let completion_context = CompletionContext {
-                trigger_kind: match &trigger_character {
-                    Some(_) => CompletionTriggerKind::TRIGGER_CHARACTER,
-                    None => CompletionTriggerKind::INVOKED,
+                trigger_kind: if trigger_character.is_some() {
+                    CompletionTriggerKind::TRIGGER_CHARACTER
+                } else {
+                    CompletionTriggerKind::INVOKED
                 },
-                trigger_character,
+                trigger_character: trigger_character.cloned(),
             };
 
             provider.completions(&buffer, buffer_position, completion_context, window, cx)
